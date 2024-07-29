@@ -1,12 +1,15 @@
 # frozen_string_literal: true
 
+require 'net-http2'
+require 'net/http/status'
+
 module Faraday
   class Adapter
     # This class provides the main implementation for your adapter.
     # There are some key responsibilities that your adapter should satisfy:
     # * Initialize and store internally the client you chose (e.g. Net::HTTP)
     # * Process requests and save the response (see `#call`)
-    class MyAdapter < Faraday::Adapter
+    class NetHttp2 < Faraday::Adapter
       # The initialize method is lazy-called ONCE when the connection stack is built.
       # See https://github.com/lostisland/faraday/blob/master/lib/faraday/rack_builder.rb
       #
@@ -37,32 +40,40 @@ module Faraday
         # * Initialize `env.response` to a `Faraday::Response`
         super
 
-        # Next you want to configure your client for the request and perform it, obtaining the response.
-        response = {} # Make call using client
+        client = ::NetHttp2::Client.new(env[:url], connect_timeout: env[:open_timeout])
+
+        opts = {
+          method: env[:method],
+          body: env[:body],
+          headers: env[:request_headers],
+          accept_encoding: ''
+        }.merge(@connection_options)
+
+        response = client.call(env[:method], env[:url].request_uri, opts)
 
         # Now that you got the response in the client's format, you need to call `save_response` to store the necessary
         # details into the `env`. This method accepts a block to make it easier for you to set response headers using
         # `Faraday::Utils::Headers`. Simply provide a block that given a `response_headers` hash sets the necessary key/value pairs.
         # Faraday will automatically take care of things like capitalising keys and coercing values.
-        save_response(env, response.status, response.body, response.headers, response.reason_phrase) do |response_headers|
+        reason_phrase = Net::HTTP::STATUS_CODES.fetch(response.status.to_i)
+        save_response(env, response.status, response.body, response.headers, reason_phrase) do |response_headers|
           response.headers.each do |key, value|
             response_headers[key] = value
           end
         end
+
+        client.close
 
         # NOTE: An adapter `call` MUST return the `env.response`. If `save_response` is the last line in your `call`
         # method implementation, it will automatically return the response for you.
         # Otherwise, you'll need to manually do so. You can do this with any (not both) of the following lines:
 
         # @app.call(env)
-        # env.response
-      rescue MyAdapterTimeout => e
-        # Finally, it's good practice to rescue client-specific exceptions (e.g. Timeout, ConnectionFailed, etc...)
-        # and re-raise them as Faraday Errors. Check `Faraday::Error` for a list of all errors.
-        #
-        # Most errors allow you to provide the original exception and optionally (if available) the response, to
-        # make them available outside of the middleware stack.
+        env.response
+      rescue Errno::ETIMEDOUT, ::NetHttp2::AsyncRequestTimeout => e
         raise Faraday::TimeoutError, e
+      rescue Errno::ECONNREFUSED => e
+        raise Faraday::ConnectionFailed, e
       end
     end
   end
