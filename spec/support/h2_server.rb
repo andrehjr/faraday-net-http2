@@ -10,7 +10,7 @@ class H2Server
     @server_thread = nil
     @threads       = []
     @logger = Logger.new(STDOUT)
-    @logger.level = log_level
+    # @logger.level = log_level
   end
 
   def listen
