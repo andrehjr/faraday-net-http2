@@ -49,28 +49,60 @@ module Faraday
           accept_encoding: ''
         }.merge(@connection_options)
 
-        response = client.call(env[:method], env[:url].request_uri, opts)
+        streaming = env[:request][:on_data].is_a?(Proc)
+
+        headers   = nil
+        body      = String.new
+        size      = 0
+        status    = nil
+
+        if streaming
+          request = client.prepare_request(env[:method], env[:url].request_uri, opts)
+          yielded = false
+
+          request.on(:headers) do |hs|
+            headers = hs
+            status = hs[':status'].to_i
+          end
+          request.on(:body_chunk) do |chunk|
+            yielded = true
+            size += chunk.bytesize
+            body << chunk
+            env[:request][:on_data].call(chunk, size)
+          end
+          request.on(:close) do
+            reason_phrase = Net::HTTP::STATUS_CODES.fetch(status)
+            save_response(env, status, "", headers, reason_phrase) do |response_headers|
+              headers.each do |key, value|
+                response_headers[key] = value
+              end
+            end
+            client.close
+          end
+
+          client.call_async(request)
+          @app.call(env)
+        else
+          response = client.call(env[:method], env[:url].request_uri, opts)
+          headers = response.headers
+          body = response.body
+          status = response.status.to_i
+
+          client.close
+
+          reason_phrase = Net::HTTP::STATUS_CODES.fetch(status)
+          save_response(env, status, body, headers, reason_phrase) do |response_headers|
+            headers.each do |key, value|
+              response_headers[key] = value
+            end
+          end
+        end
 
         # Now that you got the response in the client's format, you need to call `save_response` to store the necessary
         # details into the `env`. This method accepts a block to make it easier for you to set response headers using
         # `Faraday::Utils::Headers`. Simply provide a block that given a `response_headers` hash sets the necessary key/value pairs.
         # Faraday will automatically take care of things like capitalising keys and coercing values.
-        reason_phrase = Net::HTTP::STATUS_CODES.fetch(response.status.to_i)
-        save_response(env, response.status, response.body, response.headers, reason_phrase) do |response_headers|
-          response.headers.each do |key, value|
-            response_headers[key] = value
-          end
-        end
-
-        client.close
-
-        # NOTE: An adapter `call` MUST return the `env.response`. If `save_response` is the last line in your `call`
-        # method implementation, it will automatically return the response for you.
-        # Otherwise, you'll need to manually do so. You can do this with any (not both) of the following lines:
-
-        # @app.call(env)
-        env.response
-      rescue Errno::ETIMEDOUT, ::NetHttp2::AsyncRequestTimeout => e
+       rescue Errno::ETIMEDOUT, ::NetHttp2::AsyncRequestTimeout => e
         raise Faraday::TimeoutError, e
       rescue Errno::ECONNREFUSED => e
         raise Faraday::ConnectionFailed, e

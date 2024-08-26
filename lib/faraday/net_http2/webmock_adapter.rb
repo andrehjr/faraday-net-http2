@@ -5,6 +5,24 @@ require 'webmock'
 module WebMock
   module HttpLibAdapters
     class WebMockNetHttp2Client < NetHttp2::Client
+      def call_async(request)
+        request_signature = WebMock::RequestSignature.new request.method, request.uri, body: request.body, headers: request.headers
+        WebMock::RequestRegistry.instance.requested_signatures.put(request_signature)
+
+        if (mock_response = WebMock::StubRegistry.instance.response_for_request(request_signature))
+          raise Errno::ETIMEDOUT if mock_response.should_timeout
+
+          request.emit(:headers, { ":status" => mock_response.status[0] }.merge(mock_response.headers || {}))
+          request.emit(:body_chunk, mock_response.body)
+          WebMock::CallbackRegistry.invoke_callbacks({ lib: :net_http2 }, request_signature, mock_response)
+
+          request.emit(:close, nil)
+        elsif WebMock.net_connect_allowed?(request_signature.uri)
+          super
+        else
+          raise WebMock::NetConnectNotAllowedError, request_signature
+        end
+      end
 
       def call(method, path, options={})
         request = prepare_request(method, path, options)
